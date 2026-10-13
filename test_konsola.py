@@ -2,6 +2,7 @@
 Uruchom:  python test_konsola.py
 """
 import base64
+import http.client
 import json
 import os
 import tempfile
@@ -31,6 +32,16 @@ def get(url, haslo=None):
         return e.code, ""
 
 
+def formularz(port, pola, haslo=None):
+    """POST z panelu bez podążania za przekierowaniem; zwraca kod odpowiedzi."""
+    c = http.client.HTTPConnection("127.0.0.1", port)
+    h = {"Content-Type": "application/x-www-form-urlencoded"}
+    if haslo:
+        h["Authorization"] = "Basic " + base64.b64encode(f"admin:{haslo}".encode()).decode()
+    c.request("POST", "/panel/rozlacz", "&".join(f"{k}={v}" for k, v in pola.items()), h)
+    return c.getresponse().status
+
+
 def main():
     konsola.Obsluga.baza = konsola.Baza(os.path.join(tempfile.mkdtemp(), "t.db"))
     konsola.Obsluga.haslo = HASLO
@@ -56,6 +67,16 @@ def main():
     assert "<script>alert(1)" not in strona and "&lt;script&gt;" in strona, "XSS: nazwa komputera nie zescapowana"
     assert "online: 1 / 1" in strona and "1 aktywna" in strona and "Karol" in strona and "203.0.113.5" in strona
 
+    # rozłączanie: przycisk w panelu, CSRF, kolejka -> {"disconnect":[7]} dokładnie raz
+    assert "Rozłącz" in strona and konsola.CSRF in strona
+    p = srv.server_port
+    assert formularz(p, {"id": "123456789", "t": konsola.CSRF}) == 401
+    assert formularz(p, {"id": "123456789", "t": "obcy-token"}, HASLO) == 403
+    assert formularz(p, {"id": "123456789", "t": konsola.CSRF}, HASLO) == 303
+    hb = {"id": "123456789", "uuid": "dXVpZA==", "ver": 1005000, "conns": [7], "modified_at": 0}
+    assert json.loads(post(u + "/api/heartbeat", hb)) == {"disconnect": [7]}
+    assert json.loads(post(u + "/api/heartbeat", hb)) == {}
+
     # śmieci z sieci -> 400, nie wywrotka
     for zle in (b"nie-json", b"[1,2]", b'{"bez_id":1}'):
         req = urllib.request.Request(u + "/api/heartbeat", zle)
@@ -66,7 +87,7 @@ def main():
             assert e.code == 400
     assert get(u + "/logo.png")[0] == 200
     srv.shutdown()
-    print("OK: kontrakt sysinfo/heartbeat/audit, logowanie, XSS, błędne dane")
+    print("OK: kontrakt sysinfo/heartbeat/audit, rozłączanie (CSRF), logowanie, XSS, błędne dane")
 
 
 if __name__ == "__main__":

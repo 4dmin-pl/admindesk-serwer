@@ -5,6 +5,8 @@ Klient sam wysyła tu meldunki (adres API = host serwera, port 21114 — common.
   POST /api/heartbeat   co 15 s: id, uuid, ver, aktywne sesje   -> {} lub {"sysinfo": 1} (nieznane urządzenie)
   POST /api/audit/conn  początek/koniec połączenia, kto i skąd  -> ""
 Panel:  GET /  (Basic Auth: login „admin”, hasło z ADMIN_PASSWORD)
+        POST /panel/rozlacz  -> sesje urządzenia trafiają do kolejki; najbliższy heartbeat (co 3 s przy aktywnej sesji)
+                                dostaje {"disconnect": [...]} i klient je zamyka (connection.rs: „Closed manually by web console”)
 
 Uruchomienie:  ADMIN_PASSWORD=... python konsola.py [port=21114] [baza=konsola.db]
 Tylko biblioteka standardowa Pythona.
@@ -13,6 +15,7 @@ import hmac
 import html
 import json
 import os
+import secrets
 import sqlite3
 import sys
 import threading
@@ -20,8 +23,10 @@ import time
 from base64 import b64decode
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs
 
 ONLINE_S = 45  # klient wysyła heartbeat co 15 s (sync.rs TIME_HEARTBEAT)
+CSRF = secrets.token_urlsafe(24)  # token formularzy panelu; obca strona go nie odczyta (same-origin), restart = odśwież panel
 MAX_BODY = 64 * 1024
 HERE = Path(__file__).resolve().parent
 
@@ -32,6 +37,7 @@ CREATE TABLE IF NOT EXISTS devices (
 CREATE TABLE IF NOT EXISTS audit (
   ts REAL, device_id TEXT, conn_id INTEGER, action TEXT, ip TEXT,
   peer_id TEXT, peer_name TEXT, type INTEGER, nonce TEXT UNIQUE);
+CREATE TABLE IF NOT EXISTS rozlacz (device_id TEXT, conn_id INTEGER, ts REAL);
 """
 
 
@@ -82,6 +88,8 @@ class Obsluga(BaseHTTPRequestHandler):
 
     # ---------------- API klientów ----------------
     def do_POST(self):
+        if self.path == "/panel/rozlacz":
+            return self.rozlacz()
         v = self.json_z_ciala()
         if v is None:
             return self.odpowiedz(400, "bad request")
@@ -99,7 +107,11 @@ class Obsluga(BaseHTTPRequestHandler):
             znane = self.baza.sql("UPDATE devices SET last_seen=?, conns=?, ip=? WHERE id=? RETURNING id",
                                   (teraz, json.dumps(conns[:50]), ip, dev))
             # nieznane urządzenie (np. po czyszczeniu bazy) -> klient wyśle sysinfo ponownie (sync.rs: rsp "sysinfo")
-            return self.odpowiedz(200, "{}" if znane else '{"sysinfo":1}', "application/json")
+            if not znane:
+                return self.odpowiedz(200, '{"sysinfo":1}', "application/json")
+            self.baza.sql("DELETE FROM rozlacz WHERE ts < ?", (teraz - 300,))  # zlecenie dla sesji, której już nie ma
+            do_zamkniecia = [r[0] for r in self.baza.sql("DELETE FROM rozlacz WHERE device_id=? RETURNING conn_id", (dev,))]
+            return self.odpowiedz(200, json.dumps({"disconnect": do_zamkniecia} if do_zamkniecia else {}), "application/json")
         if self.path == "/api/audit/conn":
             peer = v.get("peer") if isinstance(v.get("peer"), list) else [None, None]
             self.baza.sql(
@@ -120,6 +132,21 @@ class Obsluga(BaseHTTPRequestHandler):
             return self.odpowiedz(200, self.panel(), "text/html; charset=utf-8", [("Cache-Control", "no-store")])
         return self.odpowiedz(404, "nie ma")
 
+    def rozlacz(self):
+        if not self.zalogowany():
+            return self.odpowiedz(401, "Wymagane logowanie", naglowki=[("WWW-Authenticate", 'Basic realm="AdminDesk Konsola"')])
+        n = int(self.headers.get("Content-Length") or 0)
+        f = parse_qs(self.rfile.read(n).decode(errors="replace")) if 0 < n <= 4096 else {}
+        if not hmac.compare_digest((f.get("t") or [""])[0].encode(), CSRF.encode()):
+            return self.odpowiedz(403, "Nieważny formularz — odśwież panel")
+        dev = (f.get("id") or [""])[0][:32]
+        wiersz = self.baza.sql("SELECT conns FROM devices WHERE id=?", (dev,))
+        teraz = time.time()
+        for c in json.loads(wiersz[0][0] or "[]") if wiersz else []:
+            if isinstance(c, int):
+                self.baza.sql("INSERT INTO rozlacz VALUES(?,?,?)", (dev, c, teraz))
+        return self.odpowiedz(303, "", naglowki=[("Location", "/")])
+
     def zalogowany(self):
         a = self.headers.get("Authorization", "")
         if not a.startswith("Basic "):
@@ -129,6 +156,12 @@ class Obsluga(BaseHTTPRequestHandler):
         except ValueError:
             return False
         return hmac.compare_digest(user.encode(), b"admin") & hmac.compare_digest(pw.encode(), self.haslo.encode())
+
+    @staticmethod
+    def przycisk(dev, sesje):
+        return (f"<form method=post action=/panel/rozlacz onsubmit=\"return confirm('Rozłączyć aktywne sesje na tym komputerze?')\">"
+                f"<b class=sesja>{sesje} aktywna</b> <input type=hidden name=id value=\"{html.escape(dev)}\">"
+                f"<input type=hidden name=t value=\"{CSRF}\"><button>Rozłącz</button></form>")
 
     def panel(self):
         teraz = time.time()
@@ -141,7 +174,7 @@ class Obsluga(BaseHTTPRequestHandler):
             wiersze.append(
                 f"<tr><td><span class='kropka {'on' if online else 'off'}'></span>{'online' if online else 'offline'}</td>"
                 f"<td class='mono'>{e(id_)}</td><td>{e(host)}</td><td>{e(user)}</td><td>{e(os_)}</td><td>{e(ver)}</td>"
-                f"<td>{'<b class=sesja>' + str(sesje) + ' aktywna</b>' if sesje else '—'}</td>"
+                f"<td>{self.przycisk(id_, sesje) if sesje else '—'}</td>"
                 f"<td class='mono'>{e(ip)}</td><td>{e(czas(seen, teraz))}</td></tr>")
         # jedno połączenie = rekordy z tym samym (device_id, conn_id): new (ip) -> auth (peer) -> close
         # shortcut: conn_id zeruje się po restarcie usługi klienta, więc grupujemy też po dniu; wystarczy do podglądu
@@ -188,7 +221,9 @@ table{{width:100%;border-collapse:collapse}} th,td{{text-align:left;padding:8px 
 th{{font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--szary)}} tr:last-child td{{border-bottom:0}}
 .mono{{font-family:ui-monospace,Consolas,monospace}} .szary{{color:var(--szary);font-size:12px}} .pusto{{color:var(--szary);text-align:center;padding:24px}}
 .kropka{{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px}} .on{{background:var(--zielony)}} .off{{background:#8b949e}}
-.sesja{{color:#d29922}} footer{{color:var(--szary);font-size:12px;text-align:center;padding:20px}}
+.sesja{{color:#d29922}} form{{margin:0;display:flex;gap:8px;align-items:center}}
+button{{font:inherit;font-size:12px;padding:3px 10px;border-radius:6px;border:1px solid #da3633;background:transparent;color:#da3633;cursor:pointer}}
+button:hover{{background:#da3633;color:#fff}} footer{{color:var(--szary);font-size:12px;text-align:center;padding:20px}}
 </style></head><body><header><img src=/logo.png alt="ADMIN by Karol Wojewski"><span class=t>AdminDesk Konsola</span>
 <span class=s>online: {online} / {wszystkie} · odświeżono {odswiezono}</span></header><main>
 <h2>Urządzenia</h2><div class=karta><table><tr><th>Stan</th><th>ID</th><th>Komputer</th><th>Użytkownik</th><th>System</th><th>Wersja</th><th>Sesje</th><th>IP</th><th>Ostatnio</th></tr>{urzadzenia}</table></div>
