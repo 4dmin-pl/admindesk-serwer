@@ -301,8 +301,12 @@ SZABLON = """<!doctype html><html lang=pl><head><meta charset=utf-8><meta name=v
 :root{{--tlo:#f4f5f7;--karta:#fff;--tekst:#1b1f24;--szary:#6b7280;--linia:#e3e6ea;--granat:#212830;--zielony:#2ea043}}
 @media(prefers-color-scheme:dark){{:root{{--tlo:#15191e;--karta:#1d232a;--tekst:#e6e8eb;--szary:#9aa3ad;--linia:#2c333b}}}}
 body{{margin:0;font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif;background:var(--tlo);color:var(--tekst)}}
-header{{background:var(--granat);color:#fff;padding:14px 20px;display:flex;align-items:center;gap:16px}}
-header img{{height:44px}} header a.k{{color:#fff;opacity:.85;font-size:13px;border:1px solid #ffffff40;border-radius:6px;padding:4px 10px;text-decoration:none}} header a.k:hover{{opacity:1;background:#ffffff1a}} header .t{{font-size:18px;font-weight:600}} header .s{{opacity:.75;margin-left:auto}}
+header{{display:flex;align-items:center;flex-wrap:wrap;gap:28px;padding:14px 28px;background:#121b29;border-bottom:1px solid #2b3a50;color:#edf2fb}}
+header img{{width:300px;max-width:100%;height:auto;display:block}}
+.util{{display:flex;align-items:center;gap:16px;flex:1 1 430px;min-width:0;flex-wrap:wrap}}
+.wl{{color:#a0aec3;font-size:13px;white-space:nowrap}} .lan{{font-size:10px;font-weight:700;letter-spacing:.08em;border:1px solid #36516d;color:#a9cfff;border-radius:5px;padding:3px 6px;margin-left:8px}}
+.konto{{display:flex;align-items:center;gap:10px;margin-left:auto}} .av{{width:32px;height:32px;border-radius:10px;background:#265baf;display:grid;place-items:center;font-weight:700;color:#fff}}
+.konto .kto{{color:#a0aec3;font-size:12px}} header a.k{{color:#edf2fb;font-size:12px;font-weight:600;border:1px solid #34445c;border-radius:8px;padding:8px 12px;text-decoration:none}} header a.k:hover{{background:#27364d;border-color:#58718f}}
 main{{max-width:1200px;margin:0 auto;padding:16px}} h2{{font-size:16px;margin:22px 0 8px}}
 .karta{{background:var(--karta);border:1px solid var(--linia);border-radius:10px;overflow-x:auto}}
 table{{width:100%;border-collapse:collapse}} th,td{{text-align:left;padding:8px 10px;border-bottom:1px solid var(--linia);white-space:nowrap}}
@@ -312,8 +316,9 @@ th{{font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--sza
 .sesja{{color:#d29922}} form{{margin:0;display:flex;gap:8px;align-items:center}}
 button{{font:inherit;font-size:12px;padding:3px 10px;border-radius:6px;border:1px solid #da3633;background:transparent;color:#da3633;cursor:pointer}}
 button:hover{{background:#da3633;color:#fff}} footer{{color:var(--szary);font-size:12px;text-align:center;padding:20px}}
-</style></head><body><header><img src=/logo.png alt="ADMIN by Karol Wojewski"><span class=t>AdminDesk Konsola</span>
-<span class=s>online: {online} / {wszystkie} · odświeżono {odswiezono}</span><a class=k href=/haslo>Zmień hasło</a><a class=k href=/wyloguj>Wyloguj</a></header><main>
+</style></head><body><header><a href=/ aria-label="AdminDesk — panel"><img src=/logo-desk.webp alt="ADMIN by Karol Wojewski | DESK"></a>
+<div class=util><span class=wl>Zdalna pomoc <span class=lan>LAN</span></span><span class=wl>online: {online} / {wszystkie} · odświeżono {odswiezono}</span>
+<div class=konto><span class=av>A</span><span class=kto>admin · administrator</span><a class=k href=/haslo>Zmień hasło</a><a class=k href=/wyloguj>Wyloguj</a></div></div></header><main>
 <h2>Urządzenia</h2><div class=karta><table><tr><th>Stan</th><th>ID</th><th>Komputer</th><th>Użytkownik</th><th>System</th><th>Wersja</th><th>Sesje</th><th>IP</th><th>Ostatnio</th></tr>{urzadzenia}</table></div>
 <h2>Połączenia (ostatnie 100)</h2><div class=karta><table><tr><th>Początek</th><th>Do komputera</th><th>Kto (technik)</th><th>Z IP</th><th>Czas</th></tr>{polaczenia}</table></div>
 </main><footer>AdminDesk — A.D.M.I.N (4dmin.pl), by Karol Wojewski · oparte na RustDesk (AGPL-3.0)</footer></body></html>"""
