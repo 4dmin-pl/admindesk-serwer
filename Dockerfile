@@ -1,6 +1,6 @@
 FROM python:3.13-alpine
 WORKDIR /app
-COPY konsola.py logo.png ./
+COPY konsola.py logo.png logo-desk.webp ./
 RUN mkdir /data && chown nobody /data
 USER nobody
 VOLUME /data

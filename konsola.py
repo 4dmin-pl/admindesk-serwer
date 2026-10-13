@@ -146,6 +146,8 @@ class Obsluga(BaseHTTPRequestHandler):
 
     # ---------------- panel ----------------
     def do_GET(self):
+        if self.path == "/logo-desk.webp":
+            return self.odpowiedz(200, (HERE / "logo-desk.webp").read_bytes(), "image/webp", [("Cache-Control", "max-age=86400")])
         if self.path == "/logo.png":
             return self.odpowiedz(200, (HERE / "logo.png").read_bytes(), "image/png", [("Cache-Control", "max-age=86400")])
         if self.path.split("?")[0] == "/login":
@@ -340,7 +342,7 @@ STOPKA = "<footer class=app-footer>AdminDesk — A.D.M.I.N (4dmin.pl) · oparte 
 
 LOGOWANIE = """<!doctype html><html lang=pl><head><meta charset=utf-8><meta name=viewport content="width=device-width, initial-scale=1">
 <title>Logowanie — AdminDesk</title>""" + STYL + """</head><body><div class=loginwrap><div class=logincard>
-<img class=loginlogo src=/logo.png alt="ADMIN — by Karol Wojewski"><p class=nazwa>AdminDesk Konsola</p><div class=blad>{blad}</div>
+<img class=loginlogo src=/logo-desk.webp alt="ADMIN by Karol Wojewski | DESK"><div class=blad>{blad}</div>
 <form method=post action=/login><input type=hidden name=t value="{csrf}">
 <div class=f><label>Konto panelu</label><input name=username value=admin autocomplete=username required></div>
 <div class=f><label>Hasło</label><input type=password name=password autocomplete=current-password autofocus required></div>
@@ -348,7 +350,7 @@ LOGOWANIE = """<!doctype html><html lang=pl><head><meta charset=utf-8><meta name
 
 HASLO = """<!doctype html><html lang=pl><head><meta charset=utf-8><meta name=viewport content="width=device-width, initial-scale=1">
 <title>Hasło — AdminDesk</title>""" + STYL + """</head><body><div class=loginwrap><div class=logincard>
-<img class=loginlogo src=/logo.png alt="ADMIN — by Karol Wojewski"><p class=nazwa>AdminDesk Konsola</p><p class=info>{info}</p><div class=blad>{blad}</div>
+<img class=loginlogo src=/logo-desk.webp alt="ADMIN by Karol Wojewski | DESK"><p class=info>{info}</p><div class=blad>{blad}</div>
 <form method=post action=/haslo><input type=hidden name=t value="{csrf}"><input type=hidden name=username value=admin autocomplete=username>
 <div class=f><label>Obecne hasło</label><input type=password name=stare autocomplete=current-password autofocus required></div>
 <div class=f><label>Nowe hasło (min. 12 znaków)</label><input type=password name=nowe minlength=12 autocomplete=new-password required></div>
