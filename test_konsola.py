@@ -43,7 +43,16 @@ def main():
     assert json.loads(post(u + "/api/heartbeat", {"id": "123456789", "uuid": "dXVpZA==", "ver": 1005000, "modified_at": 0})) == {"sysinfo": 1}
     assert post(u + "/api/sysinfo", {"id": "123456789", "uuid": "dXVpZA==", "hostname": "<script>alert(1)</script>KSIEGOWOSC",
                                      "username": "anna", "os": "Windows 11", "cpu": "x", "memory": "16GB", "version": "1.5.0"}) == "SYSINFO_UPDATED"
-    assert json.loads(post(u + "/api/heartbeat", {"id": "123456789", "uuid": "dXVpZA==", "ver": 1005000, "conns": [7], "modified_at": 0})) == {}
+    odp = json.loads(post(u + "/api/heartbeat", {"id": "123456789", "uuid": "dXVpZA==", "ver": 1005000, "conns": [7], "modified_at": 0}))
+    haslo = odp["haslo"]
+    assert set(odp) == {"haslo"} and len(haslo) == 12 and not set(haslo) & set("0O1lI"), odp
+    # to samo hasło przy kolejnym heartbeacie; obcy uuid z tym samym ID nie dostaje hasła ani nie przejmuje urządzenia
+    assert json.loads(post(u + "/api/heartbeat", {"id": "123456789", "uuid": "dXVpZA==", "ver": 1005000, "conns": [7]}))["haslo"] == haslo
+    assert "haslo" not in json.loads(post(u + "/api/heartbeat", {"id": "123456789", "uuid": "b2JjeQ==", "ver": 1005000, "conns": [7]}))
+    post(u + "/api/sysinfo", {"id": "123456789", "uuid": "b2JjeQ==", "hostname": "KSIEGOWOSC", "username": "x"})
+    assert "haslo" not in json.loads(post(u + "/api/heartbeat", {"id": "123456789", "uuid": "b2JjeQ==", "ver": 1005000, "conns": [7]})), "sysinfo z obcym uuid przejęło urządzenie"
+    post(u + "/api/sysinfo", {"id": "123456789", "uuid": "dXVpZA==", "hostname": "<script>alert(1)</script>KSIEGOWOSC",
+                              "username": "anna", "os": "Windows 11", "cpu": "x", "memory": "16GB", "version": "1.5.0"})
     # połączenie: new (ip) -> auth (kto) -> close; powtórzony nonce nie dubluje wpisu
     for a in ({"action": "new", "ip": "203.0.113.5", "nonce": "n1"}, {"peer": ["987654321", "Karol"], "type": 0, "nonce": "n2"},
               {"peer": ["987654321", "Karol"], "type": 0, "nonce": "n2"}, {"action": "close", "nonce": "n3"}):
@@ -80,8 +89,16 @@ def main():
     assert zapytanie(p, "POST", "/panel/rozlacz", {"id": "123456789", "t": "obcy"}, c2)[0] == 403
     assert zapytanie(p, "POST", "/panel/rozlacz", {"id": "123456789", "t": T}, c2)[0] == 303
     hb = {"id": "123456789", "uuid": "dXVpZA==", "ver": 1005000, "conns": [7], "modified_at": 0}
-    assert json.loads(post(u + "/api/heartbeat", hb)) == {"disconnect": [7]}
-    assert json.loads(post(u + "/api/heartbeat", hb)) == {}
+    assert json.loads(post(u + "/api/heartbeat", hb)) == {"disconnect": [7], "haslo": haslo}
+    assert json.loads(post(u + "/api/heartbeat", hb)) == {"haslo": haslo}
+
+    # przycisk „Połącz” = link do zainstalowanej Konsoli z ID i hasłem; „Nowe hasło” (CSRF) losuje inne
+    assert f"admindesk-konsola://connection/new/123456789?password={haslo}" in strona
+    assert zapytanie(p, "POST", "/panel/nowe-haslo", {"id": "123456789", "t": "obcy"}, c2)[0] == 403
+    assert zapytanie(p, "POST", "/panel/nowe-haslo", {"id": "123456789", "t": T})[1] == "/login"
+    assert zapytanie(p, "POST", "/panel/nowe-haslo", {"id": "123456789", "t": T}, c2)[0] == 303
+    nowe = json.loads(post(u + "/api/heartbeat", hb))["haslo"]
+    assert nowe != haslo and f"password={nowe}" in zapytanie(p, "GET", "/", ciastko=c2)[3]
 
     # śmieci z sieci -> 400, nie wywrotka
     for zle in (b"nie-json", b"[1,2]", b'{"bez_id":1}'):
@@ -96,7 +113,7 @@ def main():
     assert zapytanie(p, "GET", "/wyloguj", ciastko=c2)[1] == "/login"
     assert zapytanie(p, "GET", "/", ciastko=c2)[1] == "/login"
     srv.shutdown()
-    print("OK: kontrakt sysinfo/heartbeat/audit, rozłączanie (CSRF), logowanie+pierwsza zmiana hasła+wylogowanie, XSS, błędne dane")
+    print("OK: kontrakt sysinfo/heartbeat/audit, hasło per komputer (uuid, Połącz, Nowe hasło), rozłączanie (CSRF), logowanie+pierwsza zmiana hasła+wylogowanie, XSS, błędne dane")
 
 
 if __name__ == "__main__":

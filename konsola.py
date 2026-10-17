@@ -2,12 +2,16 @@
 
 Klient sam wysyła tu meldunki (adres API = host serwera, port 21114 — common.rs get_api_server):
   POST /api/sysinfo     nazwa komputera, użytkownik, system      -> "SYSINFO_UPDATED"
-  POST /api/heartbeat   co 15 s: id, uuid, ver, aktywne sesje   -> {} lub {"sysinfo": 1} (nieznane urządzenie)
+  POST /api/heartbeat   co 15 s: id, uuid, ver, aktywne sesje   -> {"haslo": ...} lub {"sysinfo": 1} (nieznane urządzenie)
+                        haslo = stałe hasło komputera losowane przez konsolę; oddawane tylko temu samemu uuid,
+                        z którym komputer zarejestrował się pierwszy raz (admindesk.rs ustaw_haslo)
   POST /api/audit/conn  początek/koniec połączenia, kto i skąd  -> ""
 Panel:  GET /login  formularz (konto „admin”); sesja w ciasteczku, GET /wyloguj
         Pierwsze logowanie hasłem z ADMIN_PASSWORD wymusza ustawienie własnego (GET/POST /haslo, hash PBKDF2 w bazie);
         od tej chwili ADMIN_PASSWORD jest ignorowane. Zmiana hasła: /haslo.
         GET /  lista urządzeń i połączeń
+        POST /panel/nowe-haslo  -> losuje nowe hasło komputera (dotrze z najbliższym heartbeatem)
+        Przycisk „Połącz” = link admindesk-konsola://connection/new/<ID>?password=<hasło> (Konsola zainstalowana)
         POST /panel/rozlacz  -> sesje urządzenia trafiają do kolejki; najbliższy heartbeat (co 3 s przy aktywnej sesji)
                                 dostaje {"disconnect": [...]} i klient je zamyka (connection.rs: „Closed manually by web console”)
 
@@ -27,7 +31,7 @@ import time
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, quote
 
 ONLINE_S = 45  # klient wysyła heartbeat co 15 s (sync.rs TIME_HEARTBEAT)
 CSRF = secrets.token_urlsafe(24)  # token formularzy panelu; obca strona go nie odczyta (same-origin), restart = odśwież panel
@@ -39,7 +43,7 @@ HERE = Path(__file__).resolve().parent
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS devices (
   id TEXT PRIMARY KEY, uuid TEXT, hostname TEXT, username TEXT, os TEXT, version TEXT,
-  cpu TEXT, memory TEXT, last_seen REAL, conns TEXT DEFAULT '[]', ip TEXT);
+  cpu TEXT, memory TEXT, last_seen REAL, conns TEXT DEFAULT '[]', ip TEXT, haslo TEXT);
 CREATE TABLE IF NOT EXISTS audit (
   ts REAL, device_id TEXT, conn_id INTEGER, action TEXT, ip TEXT,
   peer_id TEXT, peer_name TEXT, type INTEGER, nonce TEXT UNIQUE);
@@ -52,6 +56,8 @@ class Baza:
     def __init__(self, path):
         self.con = sqlite3.connect(path, check_same_thread=False)
         self.con.executescript(SCHEMA)
+        if "haslo" not in [k[1] for k in self.con.execute("PRAGMA table_info(devices)")]:  # baza sprzed 1.6
+            self.con.execute("ALTER TABLE devices ADD COLUMN haslo TEXT")
         self.lock = threading.Lock()  # shortcut: jedna blokada na całą bazę, wystarczy na setki urządzeń
 
     def sql(self, q, args=()):
@@ -69,6 +75,13 @@ def hash_hasla(haslo, sol=None, it=PBKDF2_ITER):
 def sprawdz_hash(haslo, zapisany):
     _, it, sol, _ = zapisany.split("$")
     return hmac.compare_digest(hash_hasla(haslo, sol, int(it)), zapisany)
+
+
+ZNAKI_HASLA = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # bez 0/O, 1/l/I — gdyby trzeba było przeczytać
+
+
+def nowe_haslo():
+    return "".join(secrets.choice(ZNAKI_HASLA) for _ in range(12))
 
 
 def tekst(v, n=200):
@@ -108,6 +121,8 @@ class Obsluga(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path == "/panel/rozlacz":
             return self.rozlacz()
+        if self.path == "/panel/nowe-haslo":
+            return self.zmien_haslo_komputera()
         if self.path == "/login":
             return self.zaloguj()
         if self.path == "/haslo":
@@ -119,21 +134,30 @@ class Obsluga(BaseHTTPRequestHandler):
         if self.path == "/api/sysinfo":
             self.baza.sql(
                 "INSERT INTO devices(id,uuid,hostname,username,os,version,cpu,memory,last_seen,ip) VALUES(?,?,?,?,?,?,?,?,?,?) "
-                "ON CONFLICT(id) DO UPDATE SET uuid=excluded.uuid, hostname=excluded.hostname, username=excluded.username, "
+                "ON CONFLICT(id) DO UPDATE SET uuid=COALESCE(NULLIF(devices.uuid,''), excluded.uuid), hostname=excluded.hostname, username=excluded.username, "
                 "os=excluded.os, version=excluded.version, cpu=excluded.cpu, memory=excluded.memory, last_seen=excluded.last_seen, ip=excluded.ip",
                 (dev, tekst(v.get("uuid")), tekst(v.get("hostname")), tekst(v.get("username")), tekst(v.get("os")),
                  tekst(v.get("version"), 32), tekst(v.get("cpu")), tekst(v.get("memory"), 32), teraz, ip))
             return self.odpowiedz(200, "SYSINFO_UPDATED")
         if self.path == "/api/heartbeat":
             conns = v.get("conns") if isinstance(v.get("conns"), list) else []
-            znane = self.baza.sql("UPDATE devices SET last_seen=?, conns=?, ip=? WHERE id=? RETURNING id",
+            znane = self.baza.sql("UPDATE devices SET last_seen=?, conns=?, ip=? WHERE id=? RETURNING uuid, haslo",
                                   (teraz, json.dumps(conns[:50]), ip, dev))
             # nieznane urządzenie (np. po czyszczeniu bazy) -> klient wyśle sysinfo ponownie (sync.rs: rsp "sysinfo")
             if not znane:
                 return self.odpowiedz(200, '{"sysinfo":1}', "application/json")
             self.baza.sql("DELETE FROM rozlacz WHERE ts < ?", (teraz - 300,))  # zlecenie dla sesji, której już nie ma
             do_zamkniecia = [r[0] for r in self.baza.sql("DELETE FROM rozlacz WHERE device_id=? RETURNING conn_id", (dev,))]
-            return self.odpowiedz(200, json.dumps({"disconnect": do_zamkniecia} if do_zamkniecia else {}), "application/json")
+            odp = {"disconnect": do_zamkniecia} if do_zamkniecia else {}
+            uuid, haslo = znane[0]
+            # hasło tylko dla komputera, który zarejestrował to ID (ten sam uuid) — sam numer ID nie wystarczy
+            if uuid and hmac.compare_digest(tekst(v.get("uuid")).encode(), uuid.encode()):
+                if not haslo:
+                    haslo = nowe_haslo()
+                    self.baza.sql("UPDATE devices SET haslo=? WHERE id=? AND haslo IS NULL", (haslo, dev))
+                    haslo = self.baza.sql("SELECT haslo FROM devices WHERE id=?", (dev,))[0][0]
+                odp["haslo"] = haslo
+            return self.odpowiedz(200, json.dumps(odp), "application/json")
         if self.path == "/api/audit/conn":
             peer = v.get("peer") if isinstance(v.get("peer"), list) else [None, None]
             self.baza.sql(
@@ -180,6 +204,16 @@ class Obsluga(BaseHTTPRequestHandler):
         for c in json.loads(wiersz[0][0] or "[]") if wiersz else []:
             if isinstance(c, int):
                 self.baza.sql("INSERT INTO rozlacz VALUES(?,?,?)", (dev, c, teraz))
+        return self.odpowiedz(303, "", naglowki=[("Location", "/")])
+
+    def zmien_haslo_komputera(self):
+        s = self.sesja()
+        if not s or s["zmiana"]:
+            return self.przekieruj("/login")
+        f = self.formularz()
+        if not self.csrf_ok(f):
+            return self.odpowiedz(403, "Nieważny formularz — odśwież panel")
+        self.baza.sql("UPDATE devices SET haslo=? WHERE id=?", (nowe_haslo(), (f.get("id") or [""])[0][:32]))
         return self.odpowiedz(303, "", naglowki=[("Location", "/")])
 
     # ---------------- logowanie ----------------
@@ -251,16 +285,28 @@ class Obsluga(BaseHTTPRequestHandler):
                 f"<b class=sesja>{sesje} aktywna</b> <input type=hidden name=id value=\"{html.escape(dev)}\">"
                 f"<input type=hidden name=t value=\"{CSRF}\"><button>Rozłącz</button></form>")
 
+    @staticmethod
+    def polacz(dev, haslo, online):
+        if not haslo:
+            return "<span class=szary>czeka na hasło</span>"
+        link = f"admindesk-konsola://connection/new/{quote(dev)}?password={quote(haslo)}"
+        nowe = (f"<form method=post action=/panel/nowe-haslo onsubmit=\"return confirm('Wylosować nowe hasło dla tego komputera?')\">"
+                f"<input type=hidden name=id value=\"{html.escape(dev)}\"><input type=hidden name=t value=\"{CSRF}\">"
+                f"<button class=zwykly>Nowe hasło</button></form>")
+        return (f"<div class=akcje><a class='polacz{'' if online else ' wyl'}' href=\"{html.escape(link)}\">Połącz</a>"
+                f"<details><summary>hasło</summary><span class=mono>{html.escape(haslo)}</span>{nowe}</details></div>")
+
     def panel(self):
         teraz = time.time()
         e = html.escape
-        urz = self.baza.sql("SELECT id,hostname,username,os,version,last_seen,conns,ip FROM devices ORDER BY last_seen DESC")
+        urz = self.baza.sql("SELECT id,hostname,username,os,version,last_seen,conns,ip,haslo FROM devices ORDER BY last_seen DESC")
         wiersze = []
-        for id_, host, user, os_, ver, seen, conns, ip in urz:
+        for id_, host, user, os_, ver, seen, conns, ip, haslo in urz:
             online = teraz - (seen or 0) < ONLINE_S
             sesje = len(json.loads(conns or "[]")) if online else 0  # offline = lista sesji z ostatniego meldunku jest nieaktualna
             wiersze.append(
                 f"<tr><td><span class='kropka {'on' if online else 'off'}'></span>{'online' if online else 'offline'}</td>"
+                f"<td>{self.polacz(id_, haslo, online)}</td>"
                 f"<td class='mono'>{e(id_)}</td><td>{e(host)}</td><td>{e(user)}</td><td>{e(os_)}</td><td>{e(ver)}</td>"
                 f"<td>{self.przycisk(id_, sesje) if sesje else '—'}</td>"
                 f"<td class='mono'>{e(ip)}</td><td>{e(czas(seen, teraz))}</td></tr>")
@@ -277,7 +323,7 @@ class Obsluga(BaseHTTPRequestHandler):
             for dev, host, start, koniec, pid, pname, ip in pol]
         online = sum(1 for r in urz if teraz - (r[5] or 0) < ONLINE_S)
         return SZABLON.format(
-            urzadzenia="".join(wiersze) or "<tr><td colspan=9 class=pusto>Brak urządzeń — klienci zgłoszą się po ustawieniu serwera.</td></tr>",
+            urzadzenia="".join(wiersze) or "<tr><td colspan=10 class=pusto>Brak urządzeń — klienci zgłoszą się po ustawieniu serwera.</td></tr>",
             polaczenia="".join(log) or "<tr><td colspan=5 class=pusto>Brak połączeń.</td></tr>",
             online=online, wszystkie=len(urz), odswiezono=time.strftime("%H:%M:%S"))
 
@@ -315,11 +361,15 @@ th{{font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--sza
 .kropka{{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px}} .on{{background:var(--zielony)}} .off{{background:#8b949e}}
 .sesja{{color:#d29922}} form{{margin:0;display:flex;gap:8px;align-items:center}}
 button{{font:inherit;font-size:12px;padding:3px 10px;border-radius:6px;border:1px solid #da3633;background:transparent;color:#da3633;cursor:pointer}}
-button:hover{{background:#da3633;color:#fff}} footer{{color:var(--szary);font-size:12px;text-align:center;padding:20px}}
+button:hover{{background:#da3633;color:#fff}}
+.akcje{{display:flex;gap:8px;align-items:center}} .akcje details{{font-size:12px;color:var(--szary)}} .akcje summary{{cursor:pointer}}
+a.polacz{{background:#2563eb;border:1px solid #4c8af4;color:#fff;border-radius:6px;padding:4px 12px;font-weight:600;text-decoration:none}}
+a.polacz:hover{{background:#3475e3}} a.polacz.wyl{{background:transparent;color:var(--szary);border-color:var(--linia)}}
+button.zwykly{{border-color:var(--linia);color:var(--szary);margin-top:4px}} button.zwykly:hover{{background:var(--linia);color:var(--tekst)}} footer{{color:var(--szary);font-size:12px;text-align:center;padding:20px}}
 </style></head><body><header><a href=/ aria-label="AdminDesk — panel"><img src=/logo-desk.webp alt="ADMIN by Karol Wojewski | DESK"></a>
 <div class=util><span class=wl>Zdalna pomoc <span class=lan>LAN</span></span><span class=wl>online: {online} / {wszystkie} · odświeżono {odswiezono}</span>
 <div class=konto><span class=av>A</span><span class=kto>admin · administrator</span><a class=k href=/haslo>Zmień hasło</a><a class=k href=/wyloguj>Wyloguj</a></div></div></header><main>
-<h2>Urządzenia</h2><div class=karta><table><tr><th>Stan</th><th>ID</th><th>Komputer</th><th>Użytkownik</th><th>System</th><th>Wersja</th><th>Sesje</th><th>IP</th><th>Ostatnio</th></tr>{urzadzenia}</table></div>
+<h2>Urządzenia</h2><div class=karta><table><tr><th>Stan</th><th>Połącz</th><th>ID</th><th>Komputer</th><th>Użytkownik</th><th>System</th><th>Wersja</th><th>Sesje</th><th>IP</th><th>Ostatnio</th></tr>{urzadzenia}</table></div>
 <h2>Połączenia (ostatnie 100)</h2><div class=karta><table><tr><th>Początek</th><th>Do komputera</th><th>Kto (technik)</th><th>Z IP</th><th>Czas</th></tr>{polaczenia}</table></div>
 </main><footer>AdminDesk — A.D.M.I.N (4dmin.pl), by Karol Wojewski · oparte na RustDesk (AGPL-3.0)</footer></body></html>"""
 
